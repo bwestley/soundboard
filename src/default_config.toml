@@ -1,0 +1,12 @@
+server_address = ""
+api_key = ""
+volume = 1.0
+sound_outputs = []
+notification_output = ""
+sounds = []
+
+[shortcuts]
+pause = 0
+play = 0
+disable = 0
+enable = 0

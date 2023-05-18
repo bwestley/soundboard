@@ -1,0 +1,16 @@
+[package]
+name = "soundboard"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+fltk = "1.4.2"
+fltk-theme = "0.7.0"
+rodio = "0.17.1"
+postcard = "1.0.4"
+serde = { version = "1.0.160", features = ["derive"] }
+toml = "0.7.3"
+strum_macros = "0.24"
+strum = "0.24"
