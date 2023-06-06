@@ -1,7 +1,11 @@
+use rodio::buffer;
+use rodio::{source::Source, Decoder, OutputStream, OutputStreamHandle, Sink};
 use serde::{Deserialize, Serialize};
-use std::fs;
 use std::io::{prelude::*, BufReader};
+use std::net::TcpStream;
+use std::sync::mpsc;
 use std::time::SystemTime;
+use std::{fs, thread};
 mod as_hex;
 mod event;
 use event::*;
@@ -28,8 +32,8 @@ struct ShortcutsConfig {
 }
 
 /// Holds a sound configuration.
-#[derive(Serialize, Deserialize)]
-struct SoundConfig {
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SoundConfig {
     path: String,
     name: String,
     volume: f64,
@@ -135,6 +139,23 @@ fn load_config() -> Result<Config, String> {
     }
 }
 
+/// Save the toml configuration to [`get_config_file_path`].
+fn save_config(config: &Config) -> Result<(), String> {
+    let config_file_path = get_config_file_path()?;
+    println!(
+        "[Configuration Saver] Saving configuration file \"{}\".",
+        config_file_path.display()
+    );
+
+    match toml::to_string_pretty(config) {
+        Err(error) => return Err(format!("Unable to serialize configuration file: {error}.")),
+        Ok(serialized_config) => match fs::write(&config_file_path, serialized_config) {
+            Err(error) => Err(format!("Unable to write configuration file: {error}.")),
+            Ok(_) => Ok(()),
+        },
+    }
+}
+
 /// Format a [`SystemTime`] as T+{ms} or T-{ms} relative to the current system time.
 fn format_timestamp(timestamp: SystemTime) -> String {
     match timestamp.elapsed() {
@@ -143,69 +164,110 @@ fn format_timestamp(timestamp: SystemTime) -> String {
     }
 }
 
-fn main() {
-    // Load configuration file.
-    let config = load_config().unwrap();
-    println!(
-        "[Remote Input Client] Connecting to remote input server {}.",
-        &config.server_address
-    );
+struct RemoteInputClient {
+    buffer_reader: BufReader<TcpStream>,
+    event_buffer: Vec<u8>,
+}
 
-    // Connect to the remote input server.
-    let mut stream = std::net::TcpStream::connect(&config.server_address).unwrap();
-    println!(
-        "[Remote Input Client] Connected to remote input server {}.",
-        config.server_address
-    );
+impl RemoteInputClient {
+    fn new(server_address: String, api_key: String) -> RemoteInputClient {
+        println!(
+            "[Remote Input Client] Connecting to remote input server {}.",
+            server_address
+        );
 
-    // Send the API key to the remote input server.
-    let api_key = [config.api_key.as_bytes(), &[0x00u8]].concat();
-    println!(
-        "[Remote Input Client] Sent {} byte API key.",
-        stream.write(&api_key).expect("unable to send API key")
-    );
+        // Connect to the remote input server.
+        let mut stream = std::net::TcpStream::connect(server_address.clone()).unwrap();
+        println!(
+            "[Remote Input Client] Connected to remote input server {}.",
+            server_address
+        );
 
-    // Receive events from the remote input server.
-    // Events are [`InputEventWrapper`] serialized by [`postcard`] and encoded by COBS.
-    let mut buffer_reader = BufReader::new(&mut stream);
-    let mut event_buffer = Vec::new();
-    loop {
+        // Send the API key to the remote input server.
+        let api_key = [api_key.as_bytes(), &[0x00u8]].concat();
+        println!(
+            "[Remote Input Client] Sent {} byte API key.",
+            stream.write(&api_key).expect("unable to send API key")
+        );
+
+        // Receive events from the remote input server.
+        // Events are [`InputEventWrapper`] serialized by [`postcard`] and encoded by COBS.
+        let buffer_reader = BufReader::new(stream);
+        let event_buffer = Vec::new();
+
+        RemoteInputClient {
+            buffer_reader,
+            event_buffer,
+        }
+    }
+
+    fn process_event(&mut self) -> Option<InputEventWrapper> {
         // Receive data.
-        event_buffer.clear();
-        buffer_reader
-            .read_until(0x00, &mut event_buffer)
+        self.event_buffer.clear();
+        self.buffer_reader
+            .read_until(0x00, &mut self.event_buffer)
             .expect("unable to read event");
 
         // The event should end with 0x00 because it is encoded by COBS.
-        if !event_buffer.ends_with(&[0x00]) {
+        if !self.event_buffer.ends_with(&[0x00]) {
             println!("[Remote Input Client] Connection lost.");
-            break;
+            return None;
         }
 
         // Deserialize event.
-        let event_data = event_buffer.as_mut_slice();
+        let event_data = self.event_buffer.as_mut_slice();
         println!(
             "[Remote Input Client] Received event: {}.",
             as_hex::as_hex(event_data)
         );
         match postcard::from_bytes_cobs::<InputEventWrapper>(event_data) {
             Err(deserialize_error) => {
-                println!("[Remote Input Client] Failed to deserialize event: {deserialize_error}.")
+                println!("[Remote Input Client] Failed to deserialize event: {deserialize_error}.");
+                None
             }
-            Ok(event_wrapper) => match event_wrapper.as_event() {
-                Some(enumerated_event) => {
-                    println!(
-                        "[Remote Input Client] Deserialized enumerated event: timestamp: {}, event_type: {}, code: {}, value: {}.",
-                        format_timestamp(event_wrapper.timestamp), event_wrapper.as_event_type().unwrap().as_ref(), enumerated_event.code_as_ref(), event_wrapper.value
-                    );
-                }
-                None => {
-                    println!(
-                        "[Remote Input Client] Deserialized undefined event: timestamp: {}, event_type: {}, code: {}, value: {}.",
-                        format_timestamp(event_wrapper.timestamp), event_wrapper.event_type, event_wrapper.code, event_wrapper.value
-                    );
-                }
-            },
-        };
+            Ok(event_wrapper) => {
+                match event_wrapper.as_event() {
+                    Some(enumerated_event) => {
+                        println!(
+                            "[Remote Input Client] Deserialized enumerated event: timestamp: {}, event_type: {}, code: {}, value: {}.",
+                            format_timestamp(event_wrapper.timestamp), event_wrapper.as_event_type().unwrap().as_ref(), enumerated_event.code_as_ref(), event_wrapper.value
+                        );
+                    }
+                    None => {
+                        println!(
+                            "[Remote Input Client] Deserialized undefined event: timestamp: {}, event_type: {}, code: {}, value: {}.",
+                            format_timestamp(event_wrapper.timestamp), event_wrapper.event_type, event_wrapper.code, event_wrapper.value
+                        );
+                    }
+                };
+                Some(event_wrapper)
+            }
+        }
     }
+}
+
+fn main() {
+    // Load configuration file.
+    let config = load_config().unwrap();
+    // Spawn [`remote_input_client`].
+    let (input_event_tx, input_event_rx) = mpsc::channel();
+    let server_address = config.server_address.clone();
+    let api_key = config.api_key.clone();
+    let _ = thread::spawn(move || {
+        let mut remote_input_client = RemoteInputClient::new(server_address, api_key);
+        while let Some(event) = remote_input_client.process_event() {
+            input_event_tx.send(event).expect("unable to send event");
+        }
+    });
+
+    while let Ok(_) = input_event_rx.recv() {}
+
+    // TODO: GUI
+    // TODO: Periodic and on-exit config saving
+    // TODO: AudioS
+
+    /*let (_stream, stream_handle) = OutputStream::try_default().unwrap();
+    let file = BufReader::new(File::open("../fart with extra reverb.mp3").unwrap());
+    let source = Decoder::new(file).unwrap();
+    stream_handle.play_raw(source.convert_samples()).unwrap();*/
 }
