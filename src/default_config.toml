@@ -6,7 +6,7 @@ notification_output = ""
 sounds = []
 
 [shortcuts]
-pause = 0
-play = 0
-disable = 0
-enable = 0
+pause = "KEY_RESERVED"
+play = "KEY_RESERVED"
+disable = "KEY_RESERVED"
+enable = "KEY_RESERVED"

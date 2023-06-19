@@ -1,9 +1,9 @@
-//! Enum names and values were obtained from https://github.com/torvalds/linux/blob/master/include/uapi/linux/input-event-codes.h.
-
+//! Enum names and values were obtained from <https://github.com/torvalds/linux/blob/master/include/uapi/linux/input-event-codes.h>.
+use serde::{Deserialize, Serialize};
 use strum_macros::AsRefStr;
 use strum_macros::FromRepr;
 
-#[derive(AsRefStr)]
+#[derive(Clone, Copy, Eq, PartialEq, Hash, Debug)]
 pub enum Event {
     Synchronization(Synchronization),
     Key(Key),
@@ -40,7 +40,7 @@ impl Event {
 // cSpell:disable
 /// Event types
 #[allow(non_camel_case_types, dead_code)]
-#[derive(FromRepr, AsRefStr)]
+#[derive(Clone, Copy, Eq, PartialEq, Hash, Debug, FromRepr, AsRefStr)]
 #[repr(u16)]
 pub enum EventType {
     EV_SYN = 0x00,
@@ -59,7 +59,7 @@ pub enum EventType {
 
 /// Synchronization events
 #[allow(non_camel_case_types, dead_code)]
-#[derive(FromRepr, AsRefStr)]
+#[derive(Clone, Copy, Eq, PartialEq, Hash, Debug, FromRepr, AsRefStr)]
 #[repr(u16)]
 pub enum Synchronization {
     SYN_REPORT = 0,
@@ -69,13 +69,16 @@ pub enum Synchronization {
 }
 
 #[allow(non_camel_case_types, dead_code)]
-#[derive(FromRepr, AsRefStr)]
+#[derive(
+    Clone, Copy, Eq, PartialEq, Hash, Debug, Default, Serialize, Deserialize, FromRepr, AsRefStr,
+)]
 #[repr(u16)]
 /// Keys and buttons
 ///
 /// Most of the keys/buttons are modeled after USB HUT 1.12
-/// (see http://www.usb.org/developers/hidpage).
+/// (see <https://www.usb.org/developers/hidpage>).
 pub enum Key {
+    #[default]
     KEY_RESERVED = 0,
     KEY_ESC = 1,
     KEY_1 = 2,
@@ -693,7 +696,7 @@ pub enum Key {
 
 /// Relative axes
 #[allow(non_camel_case_types, dead_code)]
-#[derive(FromRepr, AsRefStr)]
+#[derive(Clone, Copy, Eq, PartialEq, Hash, Debug, FromRepr, AsRefStr)]
 #[repr(u16)]
 pub enum RelativeAxis {
     REL_X = 0x00,
@@ -713,7 +716,7 @@ pub enum RelativeAxis {
 
 /// Absolute axes
 #[allow(non_camel_case_types, dead_code)]
-#[derive(FromRepr, AsRefStr)]
+#[derive(Clone, Copy, Eq, PartialEq, Hash, Debug, FromRepr, AsRefStr)]
 #[repr(u16)]
 pub enum AbsoluteAxis {
     ABS_X = 0x00,
@@ -763,7 +766,7 @@ pub enum AbsoluteAxis {
 
 /// Switch events
 #[allow(non_camel_case_types, dead_code)]
-#[derive(FromRepr, AsRefStr)]
+#[derive(Clone, Copy, Eq, PartialEq, Hash, Debug, FromRepr, AsRefStr)]
 #[repr(u16)]
 pub enum Switch {
     SW_LID = 0x00,
@@ -787,7 +790,7 @@ pub enum Switch {
 
 /// Misc events
 #[allow(non_camel_case_types, dead_code)]
-#[derive(FromRepr, AsRefStr)]
+#[derive(Clone, Copy, Eq, PartialEq, Hash, Debug, FromRepr, AsRefStr)]
 #[repr(u16)]
 pub enum Miscellaneous {
     MSC_SERIAL = 0x00,
@@ -800,7 +803,7 @@ pub enum Miscellaneous {
 
 /// LEDs
 #[allow(non_camel_case_types, dead_code)]
-#[derive(FromRepr, AsRefStr)]
+#[derive(Clone, Copy, Eq, PartialEq, Hash, Debug, FromRepr, AsRefStr)]
 #[repr(u16)]
 pub enum LED {
     LED_NUML = 0x00,
@@ -818,7 +821,7 @@ pub enum LED {
 
 /// Autorepeat values
 #[allow(non_camel_case_types, dead_code)]
-#[derive(FromRepr, AsRefStr)]
+#[derive(Clone, Copy, Eq, PartialEq, Hash, Debug, FromRepr, AsRefStr)]
 #[repr(u16)]
 pub enum AutoRepeat {
     REP_DELAY = 0x00,
@@ -827,7 +830,7 @@ pub enum AutoRepeat {
 
 /// Sounds
 #[allow(non_camel_case_types, dead_code)]
-#[derive(FromRepr, AsRefStr)]
+#[derive(Clone, Copy, Eq, PartialEq, Hash, Debug, FromRepr, AsRefStr)]
 #[repr(u16)]
 pub enum Sound {
     SND_CLICK = 0x00,
@@ -837,7 +840,7 @@ pub enum Sound {
 
 /// Force feedback
 #[allow(non_camel_case_types, dead_code)]
-#[derive(FromRepr, AsRefStr)]
+#[derive(Clone, Copy, Eq, PartialEq, Hash, Debug, FromRepr, AsRefStr)]
 #[repr(u16)]
 pub enum ForceFeedback {
     FF_RUMBLE = 0x50,
@@ -860,7 +863,7 @@ pub enum ForceFeedback {
 
 /// Force feedback status
 #[allow(non_camel_case_types, dead_code)]
-#[derive(FromRepr, AsRefStr)]
+#[derive(Clone, Copy, Eq, PartialEq, Hash, Debug, FromRepr, AsRefStr)]
 #[repr(u16)]
 pub enum ForceFeedbackStatus {
     FF_STATUS_STOPPED = 0x00,
