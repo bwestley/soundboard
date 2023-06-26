@@ -1,15 +1,22 @@
 use eframe::egui;
-use rodio::buffer;
-use rodio::{source::Source, Decoder, OutputStream, OutputStreamHandle, Sink};
+use egui::Slider;
+use rodio::cpal;
+use rodio::cpal::traits::HostTrait;
+use rodio::DeviceTrait;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::convert::AsRef;
-use std::time::{Duration, SystemTime};
 use std::fs;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 mod as_hex;
 mod event;
 use event::*;
 mod input;
 use input::*;
+mod audio;
+use audio::*;
 
 /// Holds configuration values read from config.toml.
 #[derive(Serialize, Deserialize)]
@@ -38,7 +45,18 @@ pub struct SoundConfig {
     path: String,
     name: String,
     volume: f64,
-    keycode: u16,
+    key: Key,
+}
+
+impl Default for SoundConfig {
+    fn default() -> Self {
+        Self {
+            path: String::new(),
+            name: String::new(),
+            volume: 1.0,
+            key: Key::KEY_RESERVED,
+        }
+    }
 }
 
 /// Get the path of the configuration file path.
@@ -225,9 +243,14 @@ struct Soundboard {
     disable_shortcut: KeyButton,
     enable_shortcut: KeyButton,
     config_saver: ConfigSaver,
+    output_devices: Vec<OutputDevice>,
+    sound_controls: HashMap<String, Vec<Arc<AtomicBool>>>,
+    new_sound: SoundConfig,
+    sound_key_buttons: Vec<KeyButton>,
 }
 
 impl Soundboard {
+    /// Create a new [`Soundboard`].
     fn new(_: &eframe::CreationContext<'_>) -> Self {
         // Load configuration file.
         let config = load_config().unwrap();
@@ -238,7 +261,7 @@ impl Soundboard {
         let mut client_manager = RemoteInputClientManager::new();
         client_manager.connect(server_address, api_key);
 
-        Self {
+        let mut self_ = Self {
             config,
             client_manager,
             pause_shortcut: KeyButton::new(),
@@ -246,7 +269,57 @@ impl Soundboard {
             disable_shortcut: KeyButton::new(),
             enable_shortcut: KeyButton::new(),
             config_saver: ConfigSaver::new(Duration::from_secs(30)),
+            output_devices: Vec::new(),
+            sound_controls: HashMap::new(),
+            sound_key_buttons: vec![KeyButton::new()],
+            new_sound: SoundConfig::default(),
+        };
+
+        for _ in 0..self_.config.sounds.len() {
+            self_.sound_key_buttons.push(KeyButton::new())
         }
+        self_.update_output_devices();
+
+        self_
+    }
+
+    /// Update the list of audio output devices.
+    fn update_output_devices(&mut self) {
+        let host = cpal::default_host();
+        self.output_devices.clear();
+        match host.output_devices() {
+            Ok(devices) => {
+                println!("[Soundboard] Found output devices.");
+                self.output_devices
+                    .extend(devices.filter_map(|device| match device.name() {
+                        Ok(name) => {
+                            let mut output_device = OutputDevice::new(device);
+                            if self.config.sound_outputs.contains(&name) {
+                                output_device.enable();
+                            }
+                            Some(output_device)
+                        }
+                        Err(error) => {
+                            println!("[Soundboard] Error finding device name: {error}.");
+                            None
+                        }
+                    }));
+            }
+            Err(error) => {
+                println!("[Soundboard] Error finding output devices: {error}.");
+            }
+        }
+    }
+
+    /// Play the audio file at `filename` on all output devices.
+    fn play_sound(&mut self, filename: &str) {
+        self.sound_controls.insert(
+            filename.to_owned(),
+            self.output_devices
+                .iter_mut()
+                .filter_map(|device| device.play_sound(filename))
+                .collect(),
+        );
     }
 }
 
@@ -269,52 +342,187 @@ impl eframe::App for Soundboard {
             .last();
 
         if !suppress_events {
-            for _event in events {
-                // TODO: Audio
-
-                /*let (_stream, stream_handle) = OutputStream::try_default().unwrap();
-                let file = BufReader::new(File::open("../fart with extra reverb.mp3").unwrap());
-                let source = Decoder::new(file).unwrap();
-                stream_handle.play_raw(source.convert_samples()).unwrap();*/
+            for key in events.iter().filter_map(|event| {
+                if event.event_type == EventType::EV_KEY as u16
+                    && event.value == 0
+                    && event.code != Key::KEY_RESERVED as u16
+                {
+                    // The event is a key release that is not `KEY_RESERVED`.
+                    Key::from_repr(event.code)
+                } else {
+                    None
+                }
+            }) {
+                for path in self
+                    .config
+                    .sounds
+                    .iter()
+                    .filter_map(|sound| {
+                        if sound.key == key {
+                            Some(sound.path.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                {
+                    self.play_sound(&path);
+                }
             }
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("Settings");
-            ui.label("Volume");
-            ui.add(egui::Slider::new(&mut self.config.volume, 0.0..=1.0).text("Volume"));
-            ui.label("Server Address");
-            ui.text_edit_singleline(&mut self.config.server_address);
-            ui.label("API Key");
-            ui.text_edit_singleline(&mut self.config.api_key);
-            if self.client_manager.connected() {
-                if ui.button("Disconnect").clicked() {
-                    self.client_manager.disconnect();
+            egui::Grid::new("sounds").show(ui, |ui| {
+                ui.heading("Sounds");
+                ui.end_row();
+
+                // New Sound
+                ui.text_edit_singleline(&mut self.new_sound.name);
+                self.sound_key_buttons[0].update(ui, &mut self.new_sound.key, last_key_released);
+                ui.add(Slider::new(&mut self.new_sound.volume, 0.0..=1.0));
+                ui.text_edit_singleline(&mut self.new_sound.path);
+                if ui.button("Add").clicked() {
+                    self.config.sounds.insert(0, self.new_sound.clone());
+                    self.new_sound = SoundConfig::default();
+                    self.sound_key_buttons.insert(0, KeyButton::new());
                 }
-            } else {
-                if ui.button("Connect").clicked() {
-                    self.client_manager.connect(
-                        self.config.server_address.clone(),
-                        self.config.api_key.clone(),
-                    );
+                ui.end_row();
+
+                // Other Sounds
+                let mut i = 0;
+                let mut action = (0, 0, 0); // ((none, remove, move), index a, index b)
+                // INVESTIGATE 035166276322b3f2324bd8b97ffcedc63fa8419f
+                let length = self.config.sounds.len();
+
+                for sound in self.config.sounds.iter_mut() {
+                    // Name
+                    ui.text_edit_singleline(&mut sound.name);
+
+                    // Key
+                    self.sound_key_buttons[i + 1].update(ui, &mut sound.key, last_key_released);
+
+                    // Volume
+                    ui.add(Slider::new(&mut sound.volume, 0.0..=1.0));
+
+                    // Path
+                    ui.text_edit_singleline(&mut sound.path);
+
+                    // Remove Sound
+                    if ui.button("Remove").clicked() {
+                        action = (1, i, 0);
+                    }
+
+                    // Move Sound
+                    if i > 0 && ui.button("^").clicked() {
+                        action = (2, i, i - 1);
+                    }
+                    if i < length - 1 && ui.button("v").clicked() {
+                        action = (2, i, i + 1)
+                    }
+
+                    ui.end_row();
+
+                    i += 1;
                 }
-            }
-            ui.heading("Shortcuts");
-            ui.label("Pause");
-            self.pause_shortcut
-                .update(ui, &mut self.config.shortcuts.pause, last_key_released);
-            ui.label("Play");
-            self.play_shortcut
-                .update(ui, &mut self.config.shortcuts.play, last_key_released);
-            ui.label("Disable");
-            self.disable_shortcut
-                .update(ui, &mut self.config.shortcuts.disable, last_key_released);
-            ui.label("Enable");
-            self.enable_shortcut
-                .update(ui, &mut self.config.shortcuts.enable, last_key_released);
+
+                // Remove or re-order a sound.
+                if action.0 == 1 {
+                    drop(self.config.sounds.remove(action.1));
+                    self.sound_key_buttons.remove(action.1 + 1); // because [0] is new_sound
+                } else if action.0 == 2 {
+                    self.config.sounds.swap(action.1, action.2);
+                    self.sound_key_buttons.swap(action.1 + 1, action.2 + 1); // because [0] is new_sound
+                }
+            });
+            egui::Grid::new("settings").show(ui, |ui| {
+                // Audio settings
+                ui.heading("Audio");
+                ui.end_row();
+                if ui.button("Reload Devices").clicked() {
+                    self.update_output_devices();
+                }
+
+                for device in self.output_devices.iter_mut() {
+                    let mut checked = device.enabled();
+                    let name = device.name();
+                    if ui.checkbox(&mut checked, name).changed() {
+                        println!("{name} {checked} {:?}", self.config.sound_outputs);
+                        if checked {
+                            assert!(!self.config.sound_outputs.contains(name), "a device in self.config.sound_outputs exists when it should not");
+                            self.config.sound_outputs.push(name.clone());
+                            device.enable()
+                        } else {
+                            self.config.sound_outputs.remove(
+                                self.config.sound_outputs.iter()
+                                .position(|x| x == name)
+                                .expect("a device in self.config.sound_outputs does not exist when it should")
+                            );
+                            device.disable()
+                        }
+                    }
+                    ui.end_row();
+                };
+
+                ui.label("Volume");
+                ui.add(Slider::new(&mut self.config.volume, 0.0..=1.0));
+                ui.end_row();
+
+                // Remote input server settings
+                ui.heading("Remote Input Server");
+                ui.end_row();
+                ui.label("Server Address");
+                ui.text_edit_singleline(&mut self.config.server_address);
+                ui.end_row();
+                ui.label("API Key");
+                ui.text_edit_singleline(&mut self.config.api_key);
+                ui.end_row();
+
+                if self.client_manager.connected() {
+                    if ui.button("Disconnect").clicked() {
+                        self.client_manager.disconnect();
+                    }
+                } else {
+                    if ui.button("Connect").clicked() {
+                        self.client_manager.connect(
+                            self.config.server_address.clone(),
+                            self.config.api_key.clone(),
+                        );
+                    }
+                }
+                ui.end_row();
+
+                // Shortcuts
+                ui.heading("Shortcuts");
+                ui.end_row();
+
+                ui.label("Pause");
+                self.pause_shortcut
+                    .update(ui, &mut self.config.shortcuts.pause, last_key_released);
+                ui.end_row();
+
+                ui.label("Play");
+                self.play_shortcut
+                    .update(ui, &mut self.config.shortcuts.play, last_key_released);
+                ui.end_row();
+
+                ui.label("Disable");
+                self.disable_shortcut
+                    .update(ui, &mut self.config.shortcuts.disable, last_key_released);
+                ui.end_row();
+
+                ui.label("Enable");
+                self.enable_shortcut
+                    .update(ui, &mut self.config.shortcuts.enable, last_key_released);
+                ui.end_row();
+            });
         });
 
         let _ = self.config_saver.save(&self.config);
+    }
+
+    fn on_close_event(&mut self) -> bool {
+        let _ = self.config_saver.save(&self.config);
+        true
     }
 }
 
@@ -329,13 +537,7 @@ fn main() {
     /*
     TODO
     - GUI
-      - Select Sound Output
       - Select Notification Output
-      - Sounds
-        - Add Sound
-        - Remove Sound
-        - Edit Sound
-        - Re-order Sound
     - Sound
         - Play
         - Pause
