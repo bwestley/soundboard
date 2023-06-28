@@ -606,7 +606,7 @@ impl eframe::App for Soundboard {
                     if action.0 == 1 {
                         drop(self.config.sounds.remove(action.1));
                         self.sound_key_buttons.remove(action.1 + 1); // because [0] is new_sound
-                        self.audio_controls.remove(action.1 + 1);
+                        self.audio_controls.remove(action.1);
                     } else if action.0 == 2 {
                         self.config.sounds.swap(action.1, action.2);
                         self.sound_key_buttons.swap(action.1 + 1, action.2 + 1); // because [0] is new_sound
