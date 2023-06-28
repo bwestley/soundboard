@@ -1,13 +1,11 @@
 use eframe::egui;
-use egui::Slider;
+use egui::{Button, Color32, RichText, Slider, TextEdit, TextStyle, Vec2};
 use rodio::cpal;
 use rodio::cpal::traits::HostTrait;
 use rodio::DeviceTrait;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::convert::AsRef;
 use std::fs;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 mod as_hex;
@@ -23,9 +21,8 @@ use audio::*;
 struct Config {
     server_address: String,
     api_key: String,
-    volume: f64,
+    volume: f32,
     sound_outputs: Vec<String>,
-    notification_output: String,
     sounds: Vec<SoundConfig>,
     shortcuts: ShortcutsConfig,
 }
@@ -34,9 +31,8 @@ struct Config {
 #[derive(Serialize, Deserialize)]
 struct ShortcutsConfig {
     pause: Key,
-    play: Key,
-    disable: Key,
-    enable: Key,
+    stop: Key,
+    modifier: Key,
 }
 
 /// Holds a sound configuration.
@@ -44,7 +40,7 @@ struct ShortcutsConfig {
 pub struct SoundConfig {
     path: String,
     name: String,
-    volume: f64,
+    volume: f32,
     key: Key,
 }
 
@@ -235,48 +231,87 @@ impl KeyButton {
     }
 }
 
+fn toggle_ui(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
+    let desired_size = egui::vec2(50.0, 25.0);
+    let (rect, mut response) = ui.allocate_exact_size(desired_size, egui::Sense::click());
+    if response.clicked() {
+        *on = !*on;
+        response.mark_changed();
+    }
+    response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, *on, ""));
+
+    if ui.is_rect_visible(rect) {
+        let how_on = ui.ctx().animate_bool(response.id, *on);
+        let visuals = ui.style().interact_selectable(&response, *on);
+        let rect = rect.expand(visuals.expansion);
+        let radius = 0.5 * rect.height();
+        ui.painter().rect(
+            rect,
+            radius,
+            if *on { Color32::GREEN } else { Color32::RED },
+            visuals.bg_stroke,
+        );
+        let circle_x = egui::lerp((rect.left() + radius)..=(rect.right() - radius), how_on);
+        let center = egui::pos2(circle_x, rect.center().y);
+        ui.painter()
+            .circle(center, 0.75 * radius, visuals.bg_fill, visuals.fg_stroke);
+    }
+
+    response
+}
+
 struct Soundboard {
     config: Config,
     client_manager: RemoteInputClientManager,
     pause_shortcut: KeyButton,
-    play_shortcut: KeyButton,
-    disable_shortcut: KeyButton,
-    enable_shortcut: KeyButton,
+    stop_shortcut: KeyButton,
+    modifier_shortcut: KeyButton,
+    modified: bool,
     config_saver: ConfigSaver,
     output_devices: Vec<OutputDevice>,
-    sound_controls: HashMap<String, Vec<Arc<AtomicBool>>>,
+    audio_controls: Vec<Arc<AudioControls>>,
+    playing: bool,
+    enabled: bool,
+    settings_window: bool,
+    manual_window: bool,
     new_sound: SoundConfig,
     sound_key_buttons: Vec<KeyButton>,
+    dropped_file: (i64, Option<String>),
 }
 
 impl Soundboard {
+    const CONFIG_AUTOSAVE: Duration = Duration::from_secs(30);
+    const MAX_FRAME_DELAY: Duration = Duration::from_millis(100);
+
     /// Create a new [`Soundboard`].
     fn new(_: &eframe::CreationContext<'_>) -> Self {
         // Load configuration file.
         let config = load_config().unwrap();
 
-        // Spawn [`remote_input_client`].
-        let server_address = config.server_address.clone();
-        let api_key = config.api_key.clone();
-        let mut client_manager = RemoteInputClientManager::new();
-        client_manager.connect(server_address, api_key);
-
         let mut self_ = Self {
             config,
-            client_manager,
+            client_manager: RemoteInputClientManager::new(),
             pause_shortcut: KeyButton::new(),
-            play_shortcut: KeyButton::new(),
-            disable_shortcut: KeyButton::new(),
-            enable_shortcut: KeyButton::new(),
-            config_saver: ConfigSaver::new(Duration::from_secs(30)),
+            stop_shortcut: KeyButton::new(),
+            modifier_shortcut: KeyButton::new(),
+            modified: false,
+            config_saver: ConfigSaver::new(Self::CONFIG_AUTOSAVE),
             output_devices: Vec::new(),
-            sound_controls: HashMap::new(),
+            audio_controls: Vec::new(),
+            playing: true,
+            enabled: false,
             sound_key_buttons: vec![KeyButton::new()],
+            settings_window: false,
+            manual_window: false,
             new_sound: SoundConfig::default(),
+            dropped_file: (0, None),
         };
 
         for _ in 0..self_.config.sounds.len() {
-            self_.sound_key_buttons.push(KeyButton::new())
+            self_
+                .audio_controls
+                .push(Arc::new(AudioControls::new(false, true, 1.0)));
+            self_.sound_key_buttons.push(KeyButton::new());
         }
         self_.update_output_devices();
 
@@ -312,14 +347,10 @@ impl Soundboard {
     }
 
     /// Play the audio file at `filename` on all output devices.
-    fn play_sound(&mut self, filename: &str) {
-        self.sound_controls.insert(
-            filename.to_owned(),
-            self.output_devices
-                .iter_mut()
-                .filter_map(|device| device.play_sound(filename))
-                .collect(),
-        );
+    fn play_sound(&mut self, filename: &str, controls: &Arc<AudioControls>) {
+        for device in self.output_devices.iter_mut() {
+            device.play_sound(filename, controls.clone());
+        }
     }
 }
 
@@ -327,9 +358,9 @@ impl eframe::App for Soundboard {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let events = self.client_manager.events();
         let suppress_events = self.pause_shortcut.listening
-            || self.play_shortcut.listening
-            || self.disable_shortcut.listening
-            || self.enable_shortcut.listening;
+            || self.stop_shortcut.listening
+            || self.modifier_shortcut.listening
+            || self.sound_key_buttons.iter().any(|k| k.listening);
         let last_key_released = events
             .iter()
             .filter_map(|input_event| {
@@ -353,120 +384,266 @@ impl eframe::App for Soundboard {
                     None
                 }
             }) {
-                for path in self
-                    .config
-                    .sounds
-                    .iter()
-                    .filter_map(|sound| {
-                        if sound.key == key {
-                            Some(sound.path.clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                {
-                    self.play_sound(&path);
+                if self.enabled {
+                    for (controls, path) in self
+                        .config
+                        .sounds
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, sound)| {
+                            if sound.key == key {
+                                if self.modified {
+                                    if self.audio_controls[i].playing() {
+                                        self.audio_controls[i].pause()
+                                    } else {
+                                        self.audio_controls[i].play()
+                                    }
+                                    self.modified = false;
+                                    None
+                                } else {
+                                    self.audio_controls[i].stop();
+                                    self.audio_controls[i] = Arc::new(AudioControls::new(
+                                        true,
+                                        false,
+                                        self.config.volume * sound.volume,
+                                    ));
+                                    Some((self.audio_controls[i].clone(), sound.path.clone()))
+                                }
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<(_, _)>>()
+                    {
+                        self.play_sound(&path, &controls);
+                    }
+                }
+
+                if key == self.config.shortcuts.pause {
+                    self.playing ^= true;
+                    for controls in &self.audio_controls {
+                        controls.set_playing(self.playing);
+                    }
+                }
+
+                if key == self.config.shortcuts.stop {
+                    self.playing = false;
+                    for controls in &self.audio_controls {
+                        controls.stop();
+                    }
+                }
+
+                if key == self.config.shortcuts.modifier {
+                    self.modified ^= true;
                 }
             }
         }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            egui::Grid::new("sounds").show(ui, |ui| {
-                ui.heading("Sounds");
-                ui.end_row();
-
-                // New Sound
-                ui.text_edit_singleline(&mut self.new_sound.name);
-                self.sound_key_buttons[0].update(ui, &mut self.new_sound.key, last_key_released);
-                ui.add(Slider::new(&mut self.new_sound.volume, 0.0..=1.0));
-                ui.text_edit_singleline(&mut self.new_sound.path);
-                if ui.button("Add").clicked() {
-                    self.config.sounds.insert(0, self.new_sound.clone());
-                    self.new_sound = SoundConfig::default();
-                    self.sound_key_buttons.insert(0, KeyButton::new());
-                }
-                ui.end_row();
-
-                // Other Sounds
-                let mut i = 0;
-                let mut action = (0, 0, 0); // ((none, remove, move), index a, index b)
-                // INVESTIGATE 035166276322b3f2324bd8b97ffcedc63fa8419f
-                let length = self.config.sounds.len();
-
-                for sound in self.config.sounds.iter_mut() {
-                    // Name
-                    ui.text_edit_singleline(&mut sound.name);
-
-                    // Key
-                    self.sound_key_buttons[i + 1].update(ui, &mut sound.key, last_key_released);
-
-                    // Volume
-                    ui.add(Slider::new(&mut sound.volume, 0.0..=1.0));
-
-                    // Path
-                    ui.text_edit_singleline(&mut sound.path);
-
-                    // Remove Sound
-                    if ui.button("Remove").clicked() {
-                        action = (1, i, 0);
-                    }
-
-                    // Move Sound
-                    if i > 0 && ui.button("^").clicked() {
-                        action = (2, i, i - 1);
-                    }
-                    if i < length - 1 && ui.button("v").clicked() {
-                        action = (2, i, i + 1)
-                    }
-
-                    ui.end_row();
-
-                    i += 1;
-                }
-
-                // Remove or re-order a sound.
-                if action.0 == 1 {
-                    drop(self.config.sounds.remove(action.1));
-                    self.sound_key_buttons.remove(action.1 + 1); // because [0] is new_sound
-                } else if action.0 == 2 {
-                    self.config.sounds.swap(action.1, action.2);
-                    self.sound_key_buttons.swap(action.1 + 1, action.2 + 1); // because [0] is new_sound
-                }
+        // Keep track of the dropped file for 5 frames. This is required because the pointer location
+        // is unknown while a file is being dragged, so .hovered will always be false when the file is dropped.
+        if self.dropped_file.1 == None || self.dropped_file.0 > 5 {
+            self.dropped_file.0 = 0;
+            self.dropped_file.1 = ctx.input(|i| {
+                i.raw
+                    .dropped_files
+                    .first()
+                    .and_then(|f| f.path.clone().and_then(|p| Some(p.display().to_string())))
             });
-            egui::Grid::new("settings").show(ui, |ui| {
-                // Audio settings
-                ui.heading("Audio");
-                ui.end_row();
-                if ui.button("Reload Devices").clicked() {
-                    self.update_output_devices();
-                }
+        } else {
+            self.dropped_file.0 += 1;
+        }
 
-                for device in self.output_devices.iter_mut() {
-                    let mut checked = device.enabled();
-                    let name = device.name();
-                    if ui.checkbox(&mut checked, name).changed() {
-                        println!("{name} {checked} {:?}", self.config.sound_outputs);
-                        if checked {
-                            assert!(!self.config.sound_outputs.contains(name), "a device in self.config.sound_outputs exists when it should not");
-                            self.config.sound_outputs.push(name.clone());
-                            device.enable()
-                        } else {
-                            self.config.sound_outputs.remove(
-                                self.config.sound_outputs.iter()
-                                .position(|x| x == name)
-                                .expect("a device in self.config.sound_outputs does not exist when it should")
-                            );
-                            device.disable()
+        egui::CentralPanel::default().show(ctx, |ui| {
+            // Enable toggle
+            if toggle_ui(ui, &mut self.enabled).changed() && self.enabled == false {
+                for controls in &self.audio_controls {
+                    controls.stop();
+                }
+            }
+
+            // Connect and disconnect from remote input server.
+            if self.client_manager.connected() {
+                if ui.button("Disconnect").clicked() {
+                    self.client_manager.disconnect();
+                }
+            } else {
+                if ui
+                    .add(
+                        Button::new(RichText::new("Connect").color(Color32::BLACK))
+                            .fill(Color32::RED),
+                    )
+                    .clicked()
+                {
+                    self.client_manager.connect(
+                        self.config.server_address.clone(),
+                        self.config.api_key.clone(),
+                    );
+                }
+            }
+
+            // Settings window
+            if ui.button("Settings").clicked() {
+                self.settings_window = true;
+            }
+
+            // Manual window
+            if ui.button("Help / Manual").clicked() {
+                self.manual_window = true;
+            }
+
+            // Volume slider
+            if ui
+                .add(Slider::new(&mut self.config.volume, 0.0..=1.0).text("Volume"))
+                .changed()
+            {
+                for (i, control) in self.audio_controls.iter_mut().enumerate() {
+                    control.set_volume(self.config.volume * self.config.sounds[i].volume);
+                }
+            }
+
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                egui::Grid::new("sounds").num_columns(9).show(ui, |ui| {
+                    // New Sound
+                    ui.label("");
+                    ui.add(
+                        TextEdit::singleline(&mut self.new_sound.name)
+                            .min_size([100.0, 10.0].into()),
+                    );
+                    self.sound_key_buttons[0].update(
+                        ui,
+                        &mut self.new_sound.key,
+                        last_key_released,
+                    );
+                    ui.add(Slider::new(&mut self.new_sound.volume, 0.0..=1.0));
+
+                    if ui
+                        .add(
+                            TextEdit::singleline(&mut self.new_sound.path)
+                                .min_size([300.0, 10.0].into()),
+                        )
+                        .hovered()
+                    {
+                        if let Some(path) = self.dropped_file.1.take() {
+                            self.new_sound.path = path;
                         }
                     }
+
+                    if ui.button("Add").clicked() {
+                        self.audio_controls.insert(
+                            0,
+                            Arc::new(AudioControls::new(
+                                false,
+                                false,
+                                self.new_sound.volume * self.config.volume,
+                            )),
+                        );
+                        self.config.sounds.insert(0, self.new_sound.clone());
+                        self.new_sound = SoundConfig::default();
+                        self.sound_key_buttons.insert(0, KeyButton::new());
+                    }
                     ui.end_row();
-                };
 
-                ui.label("Volume");
-                ui.add(Slider::new(&mut self.config.volume, 0.0..=1.0));
-                ui.end_row();
+                    // Other Sounds
+                    let mut i = 0;
+                    let mut action = (0, 0, 0); // ((none, remove, move), index a, index b)
+                    let length = self.config.sounds.len();
 
+                    for sound in self.config.sounds.iter_mut() {
+                        // Playing
+                        if self.audio_controls[i].stopped() {
+                            ui.label(RichText::new("\u{23F9}").color(Color32::RED));
+                        } else if self.audio_controls[i].playing() {
+                            ui.label(RichText::new("\u{25B6}").color(Color32::GREEN));
+                        } else {
+                            ui.label(RichText::new("\u{23F8}").color(Color32::YELLOW));
+                        }
+
+                        // Name
+                        ui.add(
+                            TextEdit::singleline(&mut sound.name).min_size([100.0, 10.0].into()),
+                        );
+
+                        // Key
+                        self.sound_key_buttons[i + 1].update(ui, &mut sound.key, last_key_released);
+
+                        // Volume
+                        if ui.add(Slider::new(&mut sound.volume, 0.0..=1.0)).changed() {
+                            self.audio_controls[i].set_volume(self.config.volume * sound.volume);
+                        }
+
+                        // Path
+                        if ui
+                            .add(
+                                TextEdit::singleline(&mut sound.path)
+                                    .min_size([300.0, 10.0].into()),
+                            )
+                            .hovered()
+                        {
+                            if let Some(path) = self.dropped_file.1.take() {
+                                sound.path = path;
+                            }
+                        }
+
+                        // Remove Sound
+                        if ui.button("Remove").clicked() {
+                            action = (1, i, 0);
+                        }
+
+                        // Move Sound
+                        if i > 0 && ui.button("^").clicked() {
+                            action = (2, i, i - 1);
+                        }
+                        if i < length - 1 && ui.button("v").clicked() {
+                            action = (2, i, i + 1)
+                        }
+
+                        ui.end_row();
+
+                        i += 1;
+                    }
+
+                    // Remove or re-order a sound.
+                    if action.0 == 1 {
+                        drop(self.config.sounds.remove(action.1));
+                        self.sound_key_buttons.remove(action.1 + 1); // because [0] is new_sound
+                        self.audio_controls.remove(action.1 + 1);
+                    } else if action.0 == 2 {
+                        self.config.sounds.swap(action.1, action.2);
+                        self.sound_key_buttons.swap(action.1 + 1, action.2 + 1); // because [0] is new_sound
+                        self.audio_controls.swap(action.1, action.2);
+                    }
+                });
+            });
+        });
+
+        let mut settings_window = self.settings_window;
+        egui::Window::new("Settings").open(&mut settings_window).collapsible(false).show(ctx, |ui| {
+            // Audio settings
+            ui.heading("Audio");
+            if ui.button("Reload Devices").clicked() {
+                self.update_output_devices();
+            }
+
+            for device in self.output_devices.iter_mut() {
+                let mut checked = device.enabled();
+                let name = device.name();
+                if ui.checkbox(&mut checked, name).changed() {
+                    if checked {
+                        assert!(!self.config.sound_outputs.contains(name), "a device in self.config.sound_outputs exists when it should not");
+                        self.config.sound_outputs.push(name.clone());
+                        device.enable()
+                    } else {
+                        self.config.sound_outputs.remove(
+                            self.config.sound_outputs.iter()
+                            .position(|x| x == name)
+                            .expect("a device in self.config.sound_outputs does not exist when it should")
+                        );
+                        device.disable()
+                    }
+                }
+            };
+
+            egui::Grid::new("settings").show(ui, |ui| {
                 // Remote input server settings
                 ui.heading("Remote Input Server");
                 ui.end_row();
@@ -475,20 +652,6 @@ impl eframe::App for Soundboard {
                 ui.end_row();
                 ui.label("API Key");
                 ui.text_edit_singleline(&mut self.config.api_key);
-                ui.end_row();
-
-                if self.client_manager.connected() {
-                    if ui.button("Disconnect").clicked() {
-                        self.client_manager.disconnect();
-                    }
-                } else {
-                    if ui.button("Connect").clicked() {
-                        self.client_manager.connect(
-                            self.config.server_address.clone(),
-                            self.config.api_key.clone(),
-                        );
-                    }
-                }
                 ui.end_row();
 
                 // Shortcuts
@@ -500,24 +663,36 @@ impl eframe::App for Soundboard {
                     .update(ui, &mut self.config.shortcuts.pause, last_key_released);
                 ui.end_row();
 
-                ui.label("Play");
-                self.play_shortcut
-                    .update(ui, &mut self.config.shortcuts.play, last_key_released);
+                ui.label("Stop");
+                self.stop_shortcut
+                    .update(ui, &mut self.config.shortcuts.stop, last_key_released);
                 ui.end_row();
 
-                ui.label("Disable");
-                self.disable_shortcut
-                    .update(ui, &mut self.config.shortcuts.disable, last_key_released);
-                ui.end_row();
-
-                ui.label("Enable");
-                self.enable_shortcut
-                    .update(ui, &mut self.config.shortcuts.enable, last_key_released);
+                ui.label("Modifier");
+                self.modifier_shortcut
+                    .update(ui, &mut self.config.shortcuts.modifier, last_key_released);
                 ui.end_row();
             });
         });
+        self.settings_window = settings_window;
+
+        let mut manual_window = self.manual_window;
+        egui::Window::new("Manual")
+            .open(&mut manual_window)
+            .collapsible(false)
+            .min_width(700.0)
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.label(
+                        RichText::new(include_str!("manual.txt")).text_style(TextStyle::Monospace),
+                    );
+                });
+            });
+        self.manual_window = manual_window;
 
         let _ = self.config_saver.save(&self.config);
+
+        ctx.request_repaint_after(Self::MAX_FRAME_DELAY);
     }
 
     fn on_close_event(&mut self) -> bool {
@@ -527,21 +702,12 @@ impl eframe::App for Soundboard {
 }
 
 fn main() {
-    let native_options = eframe::NativeOptions::default();
+    let mut native_options = eframe::NativeOptions::default();
+    native_options.min_window_size = Some(Vec2::new(850.0, 500.0));
+    native_options.drag_and_drop_support = true;
     let _ = eframe::run_native(
         "Soundboard",
         native_options,
         Box::new(|cc| Box::new(Soundboard::new(cc))),
     );
-
-    /*
-    TODO
-    - GUI
-      - Select Notification Output
-    - Sound
-        - Play
-        - Pause
-        - Disable
-        - Enable
-    */
 }

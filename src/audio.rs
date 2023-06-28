@@ -4,10 +4,69 @@ use std::{
     io::BufReader,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     time::Duration,
 };
+
+pub struct AudioControls {
+    playing: AtomicBool,
+    stopped: AtomicBool,
+    volume: Mutex<f32>,
+}
+
+impl Default for AudioControls {
+    fn default() -> Self {
+        Self {
+            playing: AtomicBool::new(true),
+            stopped: AtomicBool::new(false),
+            volume: Mutex::new(1.0),
+        }
+    }
+}
+
+impl AudioControls {
+    pub fn new(playing: bool, stopped: bool, volume: f32) -> Self {
+        Self {
+            playing: AtomicBool::new(playing),
+            stopped: AtomicBool::new(stopped),
+            volume: Mutex::new(volume),
+        }
+    }
+
+    pub fn play(&self) {
+        self.playing.store(true, Ordering::SeqCst);
+    }
+
+    pub fn pause(&self) {
+        self.playing.store(false, Ordering::SeqCst);
+    }
+
+    pub fn stop(&self) {
+        self.playing.store(false, Ordering::SeqCst);
+        self.stopped.store(true, Ordering::SeqCst);
+    }
+
+    pub fn stopped(&self) -> bool {
+        self.stopped.load(Ordering::SeqCst)
+    }
+
+    pub fn set_playing(&self, playing: bool) {
+        self.playing.store(playing, Ordering::SeqCst);
+    }
+
+    pub fn playing(&self) -> bool {
+        self.playing.load(Ordering::SeqCst)
+    }
+
+    pub fn set_volume(&self, volume: f32) {
+        *self.volume.lock().unwrap() = volume;
+    }
+
+    pub fn get_volume(&self) -> f32 {
+        *self.volume.lock().unwrap()
+    }
+}
 
 pub struct OutputDevice {
     device: rodio::Device,
@@ -76,39 +135,43 @@ impl OutputDevice {
         &self.name
     }
 
-    /// Play the audio file at `filename`.
-    pub fn play_sound(&mut self, filename: &str) -> Option<Arc<AtomicBool>> {
+    /// Play the audio file at `filename` and return true on success.
+    pub fn play_sound(&mut self, filename: &str, controls: Arc<AudioControls>) -> bool {
         // Do nothing if not enabled.
         if !self.enabled {
-            return None;
+            return false;
         }
 
         // Load audio file.
         let file = BufReader::new(match File::open(filename) {
             Err(error) => {
                 println!("[Audio] Unable to read file {filename}: {error}.");
-                return None;
+                return false;
             }
             Ok(file) => file,
         });
 
         // Decode file and setup audio pipeline.
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop_clone = stop.clone();
         let source = match Decoder::new(file) {
             Err(error) => {
                 println!("[Audio] Unable to decode file {filename}: {error}.");
-                return None;
+                return false;
             }
             Ok(source) => source,
         }
         .convert_samples()
         .stoppable()
+        .pausable(false)
+        .amplify(1.0)
         .periodic_access(Duration::from_millis(200), move |src| {
-            // Stop the sound if the [`AtomicBool`] returned from `play_sound` is set to false.
-            if stop.load(Ordering::SeqCst) {
-                src.stop()
+            // Update with [`AudioControls`].
+            if controls.stopped.load(Ordering::SeqCst) {
+                src.inner_mut().inner_mut().stop();
             }
+
+            src.inner_mut()
+                .set_paused(!controls.playing.load(Ordering::SeqCst));
+            src.set_factor(*controls.volume.lock().unwrap());
         });
 
         // Play audio.
@@ -118,10 +181,10 @@ impl OutputDevice {
             .expect("self.stream_handle is None when self.enabled is true")
             .play_raw(source)
         {
-            Ok(()) => Some(stop_clone),
+            Ok(()) => true,
             Err(error) => {
                 println!("[Audio] Unable to play {filename}: {error}.");
-                None
+                false
             }
         }
     }

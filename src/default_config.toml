@@ -2,11 +2,9 @@ server_address = ""
 api_key = ""
 volume = 1.0
 sound_outputs = []
-notification_output = ""
 sounds = []
 
 [shortcuts]
 pause = "KEY_RESERVED"
-play = "KEY_RESERVED"
-disable = "KEY_RESERVED"
-enable = "KEY_RESERVED"
+stop = "KEY_RESERVED"
+modifier = "KEY_RESERVED"
