@@ -3,7 +3,7 @@ use std::{
     fs::File,
     io::BufReader,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
     time::Duration,
@@ -72,6 +72,7 @@ pub struct OutputDevice {
     device: rodio::Device,
     name: String,
     enabled: bool,
+    volume: Arc<AtomicU64>,
     stream: Option<OutputStream>,
     stream_handle: Option<OutputStreamHandle>,
 }
@@ -82,6 +83,7 @@ impl OutputDevice {
             name: device.name().unwrap_or_else(|_| "[Unknown]".to_string()),
             device,
             enabled: false,
+            volume: Arc::new(AtomicU64::new(10000)),
             stream: None,
             stream_handle: None,
         }
@@ -152,6 +154,7 @@ impl OutputDevice {
         });
 
         // Decode file and setup audio pipeline.
+        let volume = self.volume.clone();
         let source = match Decoder::new(file) {
             Err(error) => {
                 println!("[Audio] Unable to decode file {filename}: {error}.");
@@ -171,7 +174,9 @@ impl OutputDevice {
 
             src.inner_mut()
                 .set_paused(!controls.playing.load(Ordering::SeqCst));
-            src.set_factor(*controls.volume.lock().unwrap());
+            src.set_factor(
+                *controls.volume.lock().unwrap() * (volume.load(Ordering::SeqCst) as f32) / 10000.0,
+            );
         });
 
         // Play audio.
@@ -187,5 +192,19 @@ impl OutputDevice {
                 false
             }
         }
+    }
+
+    /// Set volume.
+    pub fn set_volume(&self, volume: f32) {
+        self.volume.store(
+            (volume * 10000.0).clamp(0.0, 10000.0) as u64,
+            Ordering::SeqCst,
+        );
+    }
+
+    /// Get volume.
+    #[inline]
+    pub fn volume(&self) -> f32 {
+        self.volume.load(Ordering::SeqCst) as f32 / 10000.0
     }
 }

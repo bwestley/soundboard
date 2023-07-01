@@ -4,6 +4,7 @@ use rodio::cpal;
 use rodio::cpal::traits::HostTrait;
 use rodio::DeviceTrait;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::convert::AsRef;
 use std::fs;
 use std::sync::Arc;
@@ -22,7 +23,7 @@ struct Config {
     server_address: String,
     api_key: String,
     volume: f32,
-    sound_outputs: Vec<String>,
+    sound_outputs: HashMap<String, f32>,
     sounds: Vec<SoundConfig>,
     shortcuts: ShortcutsConfig,
 }
@@ -329,7 +330,7 @@ impl Soundboard {
                     .extend(devices.filter_map(|device| match device.name() {
                         Ok(name) => {
                             let mut output_device = OutputDevice::new(device);
-                            if self.config.sound_outputs.contains(&name) {
+                            if self.config.sound_outputs.contains_key(&name) {
                                 output_device.enable();
                             }
                             Some(output_device)
@@ -617,63 +618,90 @@ impl eframe::App for Soundboard {
         });
 
         let mut settings_window = self.settings_window;
-        egui::Window::new("Settings").open(&mut settings_window).collapsible(false).show(ctx, |ui| {
-            // Audio settings
-            ui.heading("Audio");
-            if ui.button("Reload Devices").clicked() {
-                self.update_output_devices();
-            }
+        egui::Window::new("Settings")
+            .open(&mut settings_window)
+            .collapsible(false)
+            .show(ctx, |ui| {
+                egui::Grid::new("settings").show(ui, |ui| {
+                    // Audio settings
+                    ui.heading("Audio");
+                    ui.end_row();
 
-            for device in self.output_devices.iter_mut() {
-                let mut checked = device.enabled();
-                let name = device.name();
-                if ui.checkbox(&mut checked, name).changed() {
-                    if checked {
-                        assert!(!self.config.sound_outputs.contains(name), "a device in self.config.sound_outputs exists when it should not");
-                        self.config.sound_outputs.push(name.clone());
-                        device.enable()
-                    } else {
-                        self.config.sound_outputs.remove(
-                            self.config.sound_outputs.iter()
-                            .position(|x| x == name)
-                            .expect("a device in self.config.sound_outputs does not exist when it should")
-                        );
-                        device.disable()
+                    if ui.button("Reload Devices").clicked() {
+                        self.update_output_devices();
                     }
-                }
-            };
+                    ui.end_row();
 
-            egui::Grid::new("settings").show(ui, |ui| {
-                // Remote input server settings
-                ui.heading("Remote Input Server");
-                ui.end_row();
-                ui.label("Server Address");
-                ui.text_edit_singleline(&mut self.config.server_address);
-                ui.end_row();
-                ui.label("API Key");
-                ui.text_edit_singleline(&mut self.config.api_key);
-                ui.end_row();
+                    for device in self.output_devices.iter_mut() {
+                        let mut checked = device.enabled();
+                        let name = device.name();
+                        // Enabled checkbox.
+                        let response = ui.checkbox(&mut checked, name);
+                        // Volume slider
+                        if let Some(volume) = self.config.sound_outputs.get_mut(name) {
+                            if ui
+                                .add(Slider::new(volume, 0.0..=1.0).text("Volume"))
+                                .changed()
+                            {
+                                device.set_volume(*volume);
+                            }
+                        }
+                        // Add and remove device.
+                        if response.changed() {
+                            if checked {
+                                assert!(
+                                !self.config.sound_outputs.contains_key(name),
+                                "a device in self.config.sound_outputs exists when it should not"
+                            );
+                                self.config.sound_outputs.insert(name.clone(), 1.0);
+                                device.enable();
+                            } else {
+                                self.config.sound_outputs.remove(name);
+                                device.disable();
+                            }
+                        }
+                        ui.end_row();
+                    }
 
-                // Shortcuts
-                ui.heading("Shortcuts");
-                ui.end_row();
+                    // Remote input server settings
+                    ui.heading("Remote Input Server");
+                    ui.end_row();
+                    ui.label("Server Address");
+                    ui.text_edit_singleline(&mut self.config.server_address);
+                    ui.end_row();
+                    ui.label("API Key");
+                    ui.text_edit_singleline(&mut self.config.api_key);
+                    ui.end_row();
 
-                ui.label("Pause");
-                self.pause_shortcut
-                    .update(ui, &mut self.config.shortcuts.pause, last_key_released);
-                ui.end_row();
+                    // Shortcuts
+                    ui.heading("Shortcuts");
+                    ui.end_row();
 
-                ui.label("Stop");
-                self.stop_shortcut
-                    .update(ui, &mut self.config.shortcuts.stop, last_key_released);
-                ui.end_row();
+                    ui.label("Pause");
+                    self.pause_shortcut.update(
+                        ui,
+                        &mut self.config.shortcuts.pause,
+                        last_key_released,
+                    );
+                    ui.end_row();
 
-                ui.label("Modifier");
-                self.modifier_shortcut
-                    .update(ui, &mut self.config.shortcuts.modifier, last_key_released);
-                ui.end_row();
+                    ui.label("Stop");
+                    self.stop_shortcut.update(
+                        ui,
+                        &mut self.config.shortcuts.stop,
+                        last_key_released,
+                    );
+                    ui.end_row();
+
+                    ui.label("Modifier");
+                    self.modifier_shortcut.update(
+                        ui,
+                        &mut self.config.shortcuts.modifier,
+                        last_key_released,
+                    );
+                    ui.end_row();
+                });
             });
-        });
         self.settings_window = settings_window;
 
         let mut manual_window = self.manual_window;
