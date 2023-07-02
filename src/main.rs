@@ -23,26 +23,33 @@ struct Config {
     server_address: String,
     api_key: String,
     volume: f32,
-    sound_outputs: HashMap<String, f32>,
+    outputs: HashMap<String, OutputConfig>,
     sounds: Vec<SoundConfig>,
     shortcuts: ShortcutsConfig,
+}
+
+/// Holds audio output configuration
+#[derive(Serialize, Deserialize)]
+struct OutputConfig {
+    volume: f32,
+    mute: KeyButton,
 }
 
 /// Holds shortcut configuration.
 #[derive(Serialize, Deserialize)]
 struct ShortcutsConfig {
-    pause: Key,
-    stop: Key,
-    modifier: Key,
+    pause: KeyButton,
+    stop: KeyButton,
+    modifier: KeyButton,
 }
 
 /// Holds a sound configuration.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct SoundConfig {
     path: String,
     name: String,
     volume: f32,
-    key: Key,
+    key: KeyButton,
 }
 
 impl Default for SoundConfig {
@@ -51,7 +58,7 @@ impl Default for SoundConfig {
             path: String::new(),
             name: String::new(),
             volume: 1.0,
-            key: Key::KEY_RESERVED,
+            key: KeyButton::default(),
         }
     }
 }
@@ -181,30 +188,57 @@ fn format_timestamp(timestamp: SystemTime) -> String {
     }
 }
 
+#[derive(Clone)]
 struct KeyButton {
+    pub key: Key,
     listening: bool,
 }
 
-impl KeyButton {
-    fn new() -> Self {
-        Self { listening: false }
+impl Serialize for KeyButton {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.key.serialize(serializer)
     }
-    fn update(
-        &mut self,
-        ui: &mut egui::Ui,
-        value: &mut Key,
-        last_key_released: Option<Key>,
-    ) -> egui::Response {
+}
+
+impl<'de> Deserialize<'de> for KeyButton {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(Self {
+            key: Key::deserialize(deserializer)?,
+            listening: false,
+        })
+    }
+}
+
+impl Default for KeyButton {
+    fn default() -> Self {
+        Self::new(Key::KEY_RESERVED)
+    }
+}
+
+impl KeyButton {
+    fn new(key: Key) -> Self {
+        Self {
+            key,
+            listening: false,
+        }
+    }
+    fn update(&mut self, ui: &mut egui::Ui, last_key_released: Option<Key>) -> egui::Response {
         let response = if self.listening {
             // Listening for a key release...
             if let Some(key) = last_key_released {
                 // We have obtained a last released key. Set the new value and stop listening.
-                *value = key;
+                self.key = key;
                 self.listening = false;
-                ui.button(if *value == Key::KEY_RESERVED {
+                ui.button(if self.key == Key::KEY_RESERVED {
                     "None"
                 } else {
-                    value.as_ref()
+                    self.key.as_ref()
                 })
             } else {
                 // No key has been released.
@@ -212,10 +246,10 @@ impl KeyButton {
             }
         } else {
             // We aren't listening.
-            ui.button(if *value == Key::KEY_RESERVED {
+            ui.button(if self.key == Key::KEY_RESERVED {
                 "None"
             } else {
-                value.as_ref()
+                self.key.as_ref()
             })
         };
 
@@ -225,7 +259,7 @@ impl KeyButton {
         }
         if response.secondary_clicked() {
             self.listening = false;
-            *value = Key::KEY_RESERVED;
+            self.key = Key::KEY_RESERVED;
         }
 
         response
@@ -264,19 +298,15 @@ fn toggle_ui(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
 struct Soundboard {
     config: Config,
     client_manager: RemoteInputClientManager,
-    pause_shortcut: KeyButton,
-    stop_shortcut: KeyButton,
-    modifier_shortcut: KeyButton,
     modified: bool,
     config_saver: ConfigSaver,
-    output_devices: Vec<OutputDevice>,
+    output_devices: HashMap<String, OutputDevice>,
     audio_controls: Vec<Arc<AudioControls>>,
     playing: bool,
     enabled: bool,
     settings_window: bool,
     manual_window: bool,
     new_sound: SoundConfig,
-    sound_key_buttons: Vec<KeyButton>,
     dropped_file: (i64, Option<String>),
 }
 
@@ -292,16 +322,12 @@ impl Soundboard {
         let mut self_ = Self {
             config,
             client_manager: RemoteInputClientManager::new(),
-            pause_shortcut: KeyButton::new(),
-            stop_shortcut: KeyButton::new(),
-            modifier_shortcut: KeyButton::new(),
             modified: false,
             config_saver: ConfigSaver::new(Self::CONFIG_AUTOSAVE),
-            output_devices: Vec::new(),
+            output_devices: HashMap::new(),
             audio_controls: Vec::new(),
             playing: true,
             enabled: false,
-            sound_key_buttons: vec![KeyButton::new()],
             settings_window: false,
             manual_window: false,
             new_sound: SoundConfig::default(),
@@ -312,7 +338,6 @@ impl Soundboard {
             self_
                 .audio_controls
                 .push(Arc::new(AudioControls::new(false, true, 1.0)));
-            self_.sound_key_buttons.push(KeyButton::new());
         }
         self_.update_output_devices();
 
@@ -330,10 +355,11 @@ impl Soundboard {
                     .extend(devices.filter_map(|device| match device.name() {
                         Ok(name) => {
                             let mut output_device = OutputDevice::new(device);
-                            if self.config.sound_outputs.contains_key(&name) {
+                            if let Some(output_config) = self.config.outputs.get(&name) {
+                                output_device.set_volume(output_config.volume);
                                 output_device.enable();
                             }
-                            Some(output_device)
+                            Some((name, output_device))
                         }
                         Err(error) => {
                             println!("[Soundboard] Error finding device name: {error}.");
@@ -349,7 +375,7 @@ impl Soundboard {
 
     /// Play the audio file at `filename` on all output devices.
     fn play_sound(&mut self, filename: &str, controls: &Arc<AudioControls>) {
-        for device in self.output_devices.iter_mut() {
+        for (_, device) in self.output_devices.iter_mut() {
             device.play_sound(filename, controls.clone());
         }
     }
@@ -358,10 +384,10 @@ impl Soundboard {
 impl eframe::App for Soundboard {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let events = self.client_manager.events();
-        let suppress_events = self.pause_shortcut.listening
-            || self.stop_shortcut.listening
-            || self.modifier_shortcut.listening
-            || self.sound_key_buttons.iter().any(|k| k.listening);
+        let suppress_events = self.config.shortcuts.pause.listening
+            || self.config.shortcuts.stop.listening
+            || self.config.shortcuts.modifier.listening
+            || self.config.sounds.iter().any(|s| s.key.listening);
         let last_key_released = events
             .iter()
             .filter_map(|input_event| {
@@ -392,7 +418,7 @@ impl eframe::App for Soundboard {
                         .iter()
                         .enumerate()
                         .filter_map(|(i, sound)| {
-                            if sound.key == key {
+                            if sound.key.key == key {
                                 if self.modified {
                                     if self.audio_controls[i].playing() {
                                         self.audio_controls[i].pause()
@@ -420,21 +446,27 @@ impl eframe::App for Soundboard {
                     }
                 }
 
-                if key == self.config.shortcuts.pause {
+                for (name, output_config) in &self.config.outputs {
+                    if key == output_config.mute.key {
+                        self.output_devices[name].toggle_muted();
+                    }
+                }
+
+                if key == self.config.shortcuts.pause.key {
                     self.playing ^= true;
                     for controls in &self.audio_controls {
                         controls.set_playing(self.playing);
                     }
                 }
 
-                if key == self.config.shortcuts.stop {
+                if key == self.config.shortcuts.stop.key {
                     self.playing = false;
                     for controls in &self.audio_controls {
                         controls.stop();
                     }
                 }
 
-                if key == self.config.shortcuts.modifier {
+                if key == self.config.shortcuts.modifier.key {
                     self.modified ^= true;
                 }
             }
@@ -504,17 +536,38 @@ impl eframe::App for Soundboard {
 
             egui::ScrollArea::vertical().show(ui, |ui| {
                 egui::Grid::new("sounds").num_columns(9).show(ui, |ui| {
+                    // Selected output devices
+                    for (name, device) in &self.output_devices {
+                        if device.muted() {
+                            ui.colored_label(Color32::RED, "Muted");
+                        } else {
+                            ui.colored_label(Color32::GREEN, "Playing");
+                        }
+                        ui.label(name);
+
+                        // Volume slider
+                        if ui
+                            .add(
+                                Slider::new(
+                                    &mut self.config.outputs.get_mut(name).unwrap().volume,
+                                    0.0..=1.0,
+                                )
+                                .text("Volume"),
+                            )
+                            .changed()
+                        {
+                            device.set_volume(self.config.outputs[name].volume);
+                        }
+                        ui.end_row();
+                    }
+
                     // New Sound
                     ui.label("");
                     ui.add(
                         TextEdit::singleline(&mut self.new_sound.name)
                             .min_size([100.0, 10.0].into()),
                     );
-                    self.sound_key_buttons[0].update(
-                        ui,
-                        &mut self.new_sound.key,
-                        last_key_released,
-                    );
+                    self.new_sound.key.update(ui, last_key_released);
                     ui.add(Slider::new(&mut self.new_sound.volume, 0.0..=1.0));
 
                     if ui
@@ -540,7 +593,6 @@ impl eframe::App for Soundboard {
                         );
                         self.config.sounds.insert(0, self.new_sound.clone());
                         self.new_sound = SoundConfig::default();
-                        self.sound_key_buttons.insert(0, KeyButton::new());
                     }
                     ui.end_row();
 
@@ -552,11 +604,11 @@ impl eframe::App for Soundboard {
                     for sound in self.config.sounds.iter_mut() {
                         // Playing
                         if self.audio_controls[i].stopped() {
-                            ui.label(RichText::new("\u{23F9}").color(Color32::RED));
+                            ui.colored_label(Color32::RED, "\u{23F9}");
                         } else if self.audio_controls[i].playing() {
-                            ui.label(RichText::new("\u{25B6}").color(Color32::GREEN));
+                            ui.colored_label(Color32::GREEN, "\u{25B6}");
                         } else {
-                            ui.label(RichText::new("\u{23F8}").color(Color32::YELLOW));
+                            ui.colored_label(Color32::YELLOW, "\u{23F8}");
                         }
 
                         // Name
@@ -565,7 +617,7 @@ impl eframe::App for Soundboard {
                         );
 
                         // Key
-                        self.sound_key_buttons[i + 1].update(ui, &mut sound.key, last_key_released);
+                        sound.key.update(ui, last_key_released);
 
                         // Volume
                         if ui.add(Slider::new(&mut sound.volume, 0.0..=1.0)).changed() {
@@ -606,11 +658,9 @@ impl eframe::App for Soundboard {
                     // Remove or re-order a sound.
                     if action.0 == 1 {
                         drop(self.config.sounds.remove(action.1));
-                        self.sound_key_buttons.remove(action.1 + 1); // because [0] is new_sound
                         self.audio_controls.remove(action.1);
                     } else if action.0 == 2 {
                         self.config.sounds.swap(action.1, action.2);
-                        self.sound_key_buttons.swap(action.1 + 1, action.2 + 1); // because [0] is new_sound
                         self.audio_controls.swap(action.1, action.2);
                     }
                 });
@@ -632,31 +682,34 @@ impl eframe::App for Soundboard {
                     }
                     ui.end_row();
 
-                    for device in self.output_devices.iter_mut() {
+                    for (name, device) in self.output_devices.iter_mut() {
                         let mut checked = device.enabled();
-                        let name = device.name();
-                        // Enabled checkbox.
+
+                        // Enabled checkbox
                         let response = ui.checkbox(&mut checked, name);
-                        // Volume slider
-                        if let Some(volume) = self.config.sound_outputs.get_mut(name) {
-                            if ui
-                                .add(Slider::new(volume, 0.0..=1.0).text("Volume"))
-                                .changed()
-                            {
-                                device.set_volume(*volume);
-                            }
+
+                        if let Some(output_config) = self.config.outputs.get_mut(name) {
+                            // Mute key bind button
+                            output_config.mute.update(ui, last_key_released);
                         }
+
                         // Add and remove device.
                         if response.changed() {
                             if checked {
                                 assert!(
-                                !self.config.sound_outputs.contains_key(name),
-                                "a device in self.config.sound_outputs exists when it should not"
-                            );
-                                self.config.sound_outputs.insert(name.clone(), 1.0);
+                                    !self.config.outputs.contains_key(name),
+                                    "a device in self.config.outputs exists when it should not"
+                                );
+                                self.config.outputs.insert(
+                                    name.clone(),
+                                    OutputConfig {
+                                        volume: 1.0,
+                                        mute: KeyButton::default(),
+                                    },
+                                );
                                 device.enable();
                             } else {
-                                self.config.sound_outputs.remove(name);
+                                self.config.outputs.remove(name);
                                 device.disable();
                             }
                         }
@@ -678,27 +731,15 @@ impl eframe::App for Soundboard {
                     ui.end_row();
 
                     ui.label("Pause");
-                    self.pause_shortcut.update(
-                        ui,
-                        &mut self.config.shortcuts.pause,
-                        last_key_released,
-                    );
+                    self.config.shortcuts.pause.update(ui, last_key_released);
                     ui.end_row();
 
                     ui.label("Stop");
-                    self.stop_shortcut.update(
-                        ui,
-                        &mut self.config.shortcuts.stop,
-                        last_key_released,
-                    );
+                    self.config.shortcuts.stop.update(ui, last_key_released);
                     ui.end_row();
 
                     ui.label("Modifier");
-                    self.modifier_shortcut.update(
-                        ui,
-                        &mut self.config.shortcuts.modifier,
-                        last_key_released,
-                    );
+                    self.config.shortcuts.modifier.update(ui, last_key_released);
                     ui.end_row();
                 });
             });

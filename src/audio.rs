@@ -9,6 +9,8 @@ use std::{
     time::Duration,
 };
 
+use crate::{event::Key, KeyButton, OutputConfig};
+
 pub struct AudioControls {
     playing: AtomicBool,
     stopped: AtomicBool,
@@ -73,6 +75,7 @@ pub struct OutputDevice {
     name: String,
     enabled: bool,
     volume: Arc<AtomicU64>,
+    muted: Arc<AtomicBool>,
     stream: Option<OutputStream>,
     stream_handle: Option<OutputStreamHandle>,
 }
@@ -84,6 +87,7 @@ impl OutputDevice {
             device,
             enabled: false,
             volume: Arc::new(AtomicU64::new(10000)),
+            muted: Arc::new(AtomicBool::new(false)),
             stream: None,
             stream_handle: None,
         }
@@ -155,6 +159,7 @@ impl OutputDevice {
 
         // Decode file and setup audio pipeline.
         let volume = self.volume.clone();
+        let muted = self.muted.clone();
         let source = match Decoder::new(file) {
             Err(error) => {
                 println!("[Audio] Unable to decode file {filename}: {error}.");
@@ -174,9 +179,14 @@ impl OutputDevice {
 
             src.inner_mut()
                 .set_paused(!controls.playing.load(Ordering::SeqCst));
-            src.set_factor(
-                *controls.volume.lock().unwrap() * (volume.load(Ordering::SeqCst) as f32) / 10000.0,
-            );
+            if muted.load(Ordering::SeqCst) {
+                src.set_factor(0.0);
+            } else {
+                src.set_factor(
+                    *controls.volume.lock().unwrap() * (volume.load(Ordering::SeqCst) as f32)
+                        / 10000.0,
+                );
+            }
         });
 
         // Play audio.
@@ -206,5 +216,20 @@ impl OutputDevice {
     #[inline]
     pub fn volume(&self) -> f32 {
         self.volume.load(Ordering::SeqCst) as f32 / 10000.0
+    }
+
+    /// Toggle muted.
+    pub fn toggle_muted(&self) {
+        self.muted.fetch_xor(true, Ordering::AcqRel);
+    }
+
+    pub fn set_muted(&self, muted: bool) {
+        self.muted.store(muted, Ordering::SeqCst);
+    }
+
+    /// Get muted.
+    #[inline]
+    pub fn muted(&self) -> bool {
+        self.muted.load(Ordering::SeqCst)
     }
 }
