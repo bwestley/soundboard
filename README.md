@@ -6,6 +6,8 @@ This is a simple, easy-to-use soundboard programmed in Rust. Designed for use wi
 
 * Play multiple sounds simultaneously
 * Pause and resume single or all sound playback
+* Output to multiple audio devices simultaneously
+* Mute and unmute each output with a button press
 * Fully configurable from the GUI, all settings are automatically stored in a human-readable config.toml file
 * A client for [bwestley/remote-input](https://github.com/bwestley/remote-input), a rust program that sends keyboard events from a separate linux machine over the network
 
@@ -32,41 +34,17 @@ This is a simple, easy-to-use soundboard programmed in Rust. Designed for use wi
 
 ## KEY BIND BUTTONS
 
-Key bind buttons store a specific key to trigger behavior when that key is
-    later pressed on that remote.
+Key bind buttons store a specific key to trigger behavior when that key is later pressed on that remote.
 To clear: right click.
-To set: left click before pressing a key on the remote. Left click again to
-    cancel.
+To set: left click before pressing a key on the remote. Left click again to cancel.
 
 ## SOUNDS
 
-A sound can be added by pressing the "Add" button on the top row of the sounds
-table. The fields will then be moved down into the next row. These can be
-edited at any time. The sound-specific volume and keybind settings take effect
-immediately. Press the "^" or "v" buttons to move the sounds up or down the
-list. The order of sounds has no effect. Press the "Remove" button to delete
-that sound. The indicator on the left of each sound shows if the sound is
-stopped, playing, or paused. When the sound ends, the indicator still shows
-that it is playing. Pressing the pause button (as configured in the settings
-menu under "Shortcuts") will pause all playing sounds. Pressing it again will
-play all paused sounds. Pressing the stop button (as configured...) will stop
-all playing and paused sounds. Pressing the modifier button (as configured...)
-will cause the the next button pressed to resume/pause playback instead of
-restarting play from the beginning of the sound. Pressing the modifier button
-again before pressing a sound button, or pressing a sound button will reset the
-modifier state.
+The output devices selected in the settings menu are listed with their volume control and mute status. A sound can be added by pressing the "Add" button on the top row of the sounds table. The fields will then be moved down into the next row. These can be edited at any time. The sound-specific volume and keybind settings take effect immediately. Press the "^" or "v" buttons to move the sounds up or down the list. The order of sounds has no effect. Press the "Remove" button to delete that sound. The indicator on the left of each sound shows if the sound is stopped, playing, or paused. When the sound ends, the indicator still shows that it is playing. Pressing the pause button (as configured in the settings menu under "Shortcuts") will pause all playing sounds. Pressing it again will play all paused sounds. Pressing the stop button (as configured...) will stop all playing and paused sounds. Pressing the modifier button (as configured...) will cause the the next button pressed to resume/pause playback instead of restarting play from the beginning of the sound. Pressing the modifier button again before pressing a sound button, or pressing a sound button will reset the modifier state.
 
 ## SETTINGS
 
-The settings menu can be opened with the "Settings" button. When a audio device
-is added or remove from the computer, the audio device list can be updated with
-the "Reload Devices" button. Check the box next to each device audio should
-play from. The server address may be an IP address or DNS name followed by a
-port number (e.g. rpi3.lan:8650 or 192.168.1.58:8650).The remote input server
-api key should match what is in the remote server's config.toml tile. The
-pause, stop, and modifier keybinds can be changed in the "Shortcuts" section.
-See the SOUNDS section of this manual for information on shortcut function and
-the KEY BIND BUTTONS section for instructions on how to configure keybinds.
+The settings menu can be opened with the "Settings" button. When a audio device is added or remove from the computer, the audio device list can be updated with the "Reload Devices" button. Check the box next to each device audio should play from. The server address may be an IP address or DNS name followed by a port number (e.g. rpi3.lan:8650 or 192.168.1.58:8650). The associated keybind will mute and unmute that audio device. The remote input server api key should match what is in the remote server's config.toml tile. The pause, stop, and modifier keybinds can be changed in the "Shortcuts" section. See the SOUNDS section of this manual for information on shortcut function and the KEY BIND BUTTONS section for instructions on how to configure keybinds.
 
 ## REMOTE INPUT SERVER config.toml TEMPLATE
 

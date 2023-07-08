@@ -526,7 +526,7 @@ impl eframe::App for Soundboard {
 
             // Volume slider
             if ui
-                .add(Slider::new(&mut self.config.volume, 0.0..=1.0).text("Volume"))
+                .add(Slider::new(&mut self.config.volume, 0.0..=1.0).text("Global Volume"))
                 .changed()
             {
                 for (i, control) in self.audio_controls.iter_mut().enumerate() {
@@ -534,10 +534,11 @@ impl eframe::App for Soundboard {
                 }
             }
 
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                egui::Grid::new("sounds").num_columns(9).show(ui, |ui| {
-                    // Selected output devices
-                    for (name, device) in &self.output_devices {
+            egui::Grid::new("outputs").num_columns(3).show(ui, |ui| {
+                // Selected output devices
+                for (name, device) in &self.output_devices {
+                    if let Some(output_config) = self.config.outputs.get_mut(name) {
+                        // Status
                         if device.muted() {
                             ui.colored_label(Color32::RED, "Muted");
                         } else {
@@ -547,20 +548,18 @@ impl eframe::App for Soundboard {
 
                         // Volume slider
                         if ui
-                            .add(
-                                Slider::new(
-                                    &mut self.config.outputs.get_mut(name).unwrap().volume,
-                                    0.0..=1.0,
-                                )
-                                .text("Volume"),
-                            )
+                            .add(Slider::new(&mut output_config.volume, 0.0..=1.0).text("Volume"))
                             .changed()
                         {
-                            device.set_volume(self.config.outputs[name].volume);
+                            device.set_volume(output_config.volume);
                         }
                         ui.end_row();
                     }
+                }
+            });
 
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                egui::Grid::new("sounds").num_columns(9).show(ui, |ui| {
                     // New Sound
                     ui.label("");
                     ui.add(
@@ -723,7 +722,7 @@ impl eframe::App for Soundboard {
                     ui.text_edit_singleline(&mut self.config.server_address);
                     ui.end_row();
                     ui.label("API Key");
-                    ui.text_edit_singleline(&mut self.config.api_key);
+                    ui.add(TextEdit::singleline(&mut self.config.api_key));
                     ui.end_row();
 
                     // Shortcuts
