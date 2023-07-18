@@ -3,13 +3,11 @@ use std::{
     fs::File,
     io::BufReader,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
     time::Duration,
 };
-
-use crate::{event::Key, KeyButton, OutputConfig};
 
 pub struct AudioControls {
     playing: AtomicBool,
@@ -22,7 +20,7 @@ impl Default for AudioControls {
         Self {
             playing: AtomicBool::new(true),
             stopped: AtomicBool::new(false),
-            volume: Mutex::new(1.0),
+            volume: Mutex::new(0.0),
         }
     }
 }
@@ -74,7 +72,7 @@ pub struct OutputDevice {
     device: rodio::Device,
     name: String,
     enabled: bool,
-    volume: Arc<AtomicU64>,
+    volume: Arc<Mutex<f32>>,
     muted: Arc<AtomicBool>,
     stream: Option<OutputStream>,
     stream_handle: Option<OutputStreamHandle>,
@@ -86,7 +84,7 @@ impl OutputDevice {
             name: device.name().unwrap_or_else(|_| "[Unknown]".to_string()),
             device,
             enabled: false,
-            volume: Arc::new(AtomicU64::new(10000)),
+            volume: Arc::new(Mutex::new(0.0)),
             muted: Arc::new(AtomicBool::new(false)),
             stream: None,
             stream_handle: None,
@@ -158,7 +156,7 @@ impl OutputDevice {
         });
 
         // Decode file and setup audio pipeline.
-        let volume = self.volume.clone();
+        let device_volume = self.volume.clone();
         let muted = self.muted.clone();
         let source = match Decoder::new(file) {
             Err(error) => {
@@ -182,10 +180,12 @@ impl OutputDevice {
             if muted.load(Ordering::SeqCst) {
                 src.set_factor(0.0);
             } else {
-                src.set_factor(
-                    *controls.volume.lock().unwrap() * (volume.load(Ordering::SeqCst) as f32)
-                        / 10000.0,
-                );
+                //let a = *device_volume.lock().unwrap();
+                //let b = *device_volume.lock().unwrap();
+                src.set_factor(10_f32.powf(
+                    (*controls.volume.lock().unwrap() + *device_volume.lock().unwrap()) / 20.0,
+                ));
+                //println!("{}", 10_f32.powf((a + b) / 20.0));
             }
         });
 
@@ -206,16 +206,13 @@ impl OutputDevice {
 
     /// Set volume.
     pub fn set_volume(&self, volume: f32) {
-        self.volume.store(
-            (volume * 10000.0).clamp(0.0, 10000.0) as u64,
-            Ordering::SeqCst,
-        );
+        *self.volume.lock().unwrap() = volume
     }
 
     /// Get volume.
     #[inline]
     pub fn volume(&self) -> f32 {
-        self.volume.load(Ordering::SeqCst) as f32 / 10000.0
+        *self.volume.lock().unwrap()
     }
 
     /// Toggle muted.

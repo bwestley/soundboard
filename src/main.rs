@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::convert::AsRef;
 use std::fs;
+use std::ops::RangeInclusive;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 mod as_hex;
@@ -57,7 +58,7 @@ impl Default for SoundConfig {
         Self {
             path: String::new(),
             name: String::new(),
-            volume: 1.0,
+            volume: 0.0,
             key: KeyButton::default(),
         }
     }
@@ -222,6 +223,7 @@ impl Default for KeyButton {
 }
 
 impl KeyButton {
+    const MIN_SIZE: Vec2 = Vec2::new(120.0, 10.0);
     fn new(key: Key) -> Self {
         Self {
             key,
@@ -235,22 +237,28 @@ impl KeyButton {
                 // We have obtained a last released key. Set the new value and stop listening.
                 self.key = key;
                 self.listening = false;
-                ui.button(if self.key == Key::KEY_RESERVED {
+                ui.add(
+                    Button::new(if self.key == Key::KEY_RESERVED {
+                        "None"
+                    } else {
+                        self.key.as_ref()
+                    })
+                    .min_size(Self::MIN_SIZE),
+                )
+            } else {
+                // No key has been released.
+                ui.add(Button::new("Binding...").min_size(Self::MIN_SIZE))
+            }
+        } else {
+            // We aren't listening.
+            ui.add(
+                Button::new(if self.key == Key::KEY_RESERVED {
                     "None"
                 } else {
                     self.key.as_ref()
                 })
-            } else {
-                // No key has been released.
-                ui.button("Binding...")
-            }
-        } else {
-            // We aren't listening.
-            ui.button(if self.key == Key::KEY_RESERVED {
-                "None"
-            } else {
-                self.key.as_ref()
-            })
+                .min_size(Self::MIN_SIZE),
+            )
         };
 
         if response.clicked() {
@@ -267,7 +275,7 @@ impl KeyButton {
 }
 
 fn toggle_ui(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
-    let desired_size = egui::vec2(50.0, 25.0);
+    let desired_size = Vec2::new(50.0, 25.0);
     let (rect, mut response) = ui.allocate_exact_size(desired_size, egui::Sense::click());
     if response.clicked() {
         *on = !*on;
@@ -313,6 +321,8 @@ struct Soundboard {
 impl Soundboard {
     const CONFIG_AUTOSAVE: Duration = Duration::from_secs(30);
     const MAX_FRAME_DELAY: Duration = Duration::from_millis(100);
+    const VOLUME_RANGE: RangeInclusive<f32> = -50.0..=0.0;
+    const SOUND_VOLUME_RANGE: RangeInclusive<f32> = -50.0..=50.0;
 
     /// Create a new [`Soundboard`].
     fn new(_: &eframe::CreationContext<'_>) -> Self {
@@ -337,7 +347,7 @@ impl Soundboard {
         for _ in 0..self_.config.sounds.len() {
             self_
                 .audio_controls
-                .push(Arc::new(AudioControls::new(false, true, 1.0)));
+                .push(Arc::new(AudioControls::new(false, true, 0.0)));
         }
         self_.update_output_devices();
 
@@ -432,7 +442,7 @@ impl eframe::App for Soundboard {
                                     self.audio_controls[i] = Arc::new(AudioControls::new(
                                         true,
                                         false,
-                                        self.config.volume * sound.volume,
+                                        self.config.volume + sound.volume,
                                     ));
                                     Some((self.audio_controls[i].clone(), sound.path.clone()))
                                 }
@@ -526,11 +536,14 @@ impl eframe::App for Soundboard {
 
             // Volume slider
             if ui
-                .add(Slider::new(&mut self.config.volume, 0.0..=1.0).text("Global Volume"))
+                .add(
+                    Slider::new(&mut self.config.volume, Self::VOLUME_RANGE)
+                        .text("Global Volume (dB)"),
+                )
                 .changed()
             {
                 for (i, control) in self.audio_controls.iter_mut().enumerate() {
-                    control.set_volume(self.config.volume * self.config.sounds[i].volume);
+                    control.set_volume(self.config.volume + self.config.sounds[i].volume);
                 }
             }
 
@@ -548,7 +561,10 @@ impl eframe::App for Soundboard {
 
                         // Volume slider
                         if ui
-                            .add(Slider::new(&mut output_config.volume, 0.0..=1.0).text("Volume"))
+                            .add(
+                                Slider::new(&mut output_config.volume, Self::VOLUME_RANGE)
+                                    .text("Volume (dB)"),
+                            )
                             .changed()
                         {
                             device.set_volume(output_config.volume);
@@ -559,110 +575,121 @@ impl eframe::App for Soundboard {
             });
 
             egui::ScrollArea::vertical().show(ui, |ui| {
-                egui::Grid::new("sounds").num_columns(9).show(ui, |ui| {
-                    // New Sound
-                    ui.label("");
-                    ui.add(
-                        TextEdit::singleline(&mut self.new_sound.name)
-                            .min_size([100.0, 10.0].into()),
-                    );
-                    self.new_sound.key.update(ui, last_key_released);
-                    ui.add(Slider::new(&mut self.new_sound.volume, 0.0..=1.0));
-
-                    if ui
-                        .add(
-                            TextEdit::singleline(&mut self.new_sound.path)
-                                .min_size([300.0, 10.0].into()),
-                        )
-                        .hovered()
-                    {
-                        if let Some(path) = self.dropped_file.1.take() {
-                            self.new_sound.path = path;
-                        }
-                    }
-
-                    if ui.button("Add").clicked() {
-                        self.audio_controls.insert(
-                            0,
-                            Arc::new(AudioControls::new(
-                                false,
-                                false,
-                                self.new_sound.volume * self.config.volume,
-                            )),
-                        );
-                        self.config.sounds.insert(0, self.new_sound.clone());
-                        self.new_sound = SoundConfig::default();
-                    }
-                    ui.end_row();
-
-                    // Other Sounds
-                    let mut i = 0;
-                    let mut action = (0, 0, 0); // ((none, remove, move), index a, index b)
-                    let length = self.config.sounds.len();
-
-                    for sound in self.config.sounds.iter_mut() {
-                        // Playing
-                        if self.audio_controls[i].stopped() {
-                            ui.colored_label(Color32::RED, "\u{23F9}");
-                        } else if self.audio_controls[i].playing() {
-                            ui.colored_label(Color32::GREEN, "\u{25B6}");
-                        } else {
-                            ui.colored_label(Color32::YELLOW, "\u{23F8}");
-                        }
-
-                        // Name
+                egui::Grid::new("sounds")
+                    .num_columns(9)
+                    .min_col_width(0.0)
+                    .show(ui, |ui| {
+                        // New Sound
+                        ui.label("");
                         ui.add(
-                            TextEdit::singleline(&mut sound.name).min_size([100.0, 10.0].into()),
+                            TextEdit::singleline(&mut self.new_sound.name)
+                                .min_size([100.0, 10.0].into()),
                         );
+                        self.new_sound.key.update(ui, last_key_released);
+                        ui.add(Slider::new(
+                            &mut self.new_sound.volume,
+                            Self::SOUND_VOLUME_RANGE,
+                        ));
 
-                        // Key
-                        sound.key.update(ui, last_key_released);
-
-                        // Volume
-                        if ui.add(Slider::new(&mut sound.volume, 0.0..=1.0)).changed() {
-                            self.audio_controls[i].set_volume(self.config.volume * sound.volume);
-                        }
-
-                        // Path
                         if ui
                             .add(
-                                TextEdit::singleline(&mut sound.path)
+                                TextEdit::singleline(&mut self.new_sound.path)
                                     .min_size([300.0, 10.0].into()),
                             )
                             .hovered()
                         {
                             if let Some(path) = self.dropped_file.1.take() {
-                                sound.path = path;
+                                self.new_sound.path = path;
                             }
                         }
 
-                        // Remove Sound
-                        if ui.button("Remove").clicked() {
-                            action = (1, i, 0);
+                        if ui.button("Add").clicked() {
+                            self.audio_controls.insert(
+                                0,
+                                Arc::new(AudioControls::new(
+                                    false,
+                                    false,
+                                    self.new_sound.volume + self.config.volume,
+                                )),
+                            );
+                            self.config.sounds.insert(0, self.new_sound.clone());
+                            self.new_sound = SoundConfig::default();
                         }
-
-                        // Move Sound
-                        if i > 0 && ui.button("^").clicked() {
-                            action = (2, i, i - 1);
-                        }
-                        if i < length - 1 && ui.button("v").clicked() {
-                            action = (2, i, i + 1)
-                        }
-
                         ui.end_row();
 
-                        i += 1;
-                    }
+                        // Other Sounds
+                        let mut i = 0;
+                        let mut action = (0, 0, 0); // ((none, remove, move), index a, index b)
+                        let length = self.config.sounds.len();
 
-                    // Remove or re-order a sound.
-                    if action.0 == 1 {
-                        drop(self.config.sounds.remove(action.1));
-                        self.audio_controls.remove(action.1);
-                    } else if action.0 == 2 {
-                        self.config.sounds.swap(action.1, action.2);
-                        self.audio_controls.swap(action.1, action.2);
-                    }
-                });
+                        for sound in self.config.sounds.iter_mut() {
+                            // Playing
+                            if self.audio_controls[i].stopped() {
+                                ui.colored_label(Color32::RED, "\u{23F9}");
+                            } else if self.audio_controls[i].playing() {
+                                ui.colored_label(Color32::GREEN, "\u{25B6}");
+                            } else {
+                                ui.colored_label(Color32::YELLOW, "\u{23F8}");
+                            }
+
+                            // Name
+                            ui.add(
+                                TextEdit::singleline(&mut sound.name)
+                                    .min_size([100.0, 10.0].into()),
+                            );
+
+                            // Key
+                            sound.key.update(ui, last_key_released);
+
+                            // Volume
+                            if ui
+                                .add(Slider::new(&mut sound.volume, Self::SOUND_VOLUME_RANGE))
+                                .changed()
+                            {
+                                self.audio_controls[i]
+                                    .set_volume(self.config.volume + sound.volume);
+                            }
+
+                            // Path
+                            if ui
+                                .add(
+                                    TextEdit::singleline(&mut sound.path)
+                                        .min_size([300.0, 10.0].into()),
+                                )
+                                .hovered()
+                            {
+                                if let Some(path) = self.dropped_file.1.take() {
+                                    sound.path = path;
+                                }
+                            }
+
+                            // Remove Sound
+                            if ui.button("Remove").clicked() {
+                                action = (1, i, 0);
+                            }
+
+                            // Move Sound
+                            if i > 0 && ui.button("^").clicked() {
+                                action = (2, i, i - 1);
+                            }
+                            if i < length - 1 && ui.button("v").clicked() {
+                                action = (2, i, i + 1)
+                            }
+
+                            ui.end_row();
+
+                            i += 1;
+                        }
+
+                        // Remove or re-order a sound.
+                        if action.0 == 1 {
+                            drop(self.config.sounds.remove(action.1));
+                            self.audio_controls.remove(action.1);
+                        } else if action.0 == 2 {
+                            self.config.sounds.swap(action.1, action.2);
+                            self.audio_controls.swap(action.1, action.2);
+                        }
+                    });
             });
         });
 
@@ -671,14 +698,16 @@ impl eframe::App for Soundboard {
             .open(&mut settings_window)
             .collapsible(false)
             .show(ctx, |ui| {
-                egui::Grid::new("settings").show(ui, |ui| {
-                    // Audio settings
-                    ui.heading("Audio");
-                    ui.end_row();
-
+                // Audio settings
+                ui.heading("Audio");
+                egui::Grid::new("output_settings").show(ui, |ui| {
                     if ui.button("Reload Devices").clicked() {
                         self.update_output_devices();
                     }
+                    ui.end_row();
+
+                    ui.label("Device Name");
+                    ui.label("Mute Keybind");
                     ui.end_row();
 
                     for (name, device) in self.output_devices.iter_mut() {
@@ -702,7 +731,7 @@ impl eframe::App for Soundboard {
                                 self.config.outputs.insert(
                                     name.clone(),
                                     OutputConfig {
-                                        volume: 1.0,
+                                        volume: 0.0,
                                         mute: KeyButton::default(),
                                     },
                                 );
@@ -714,21 +743,28 @@ impl eframe::App for Soundboard {
                         }
                         ui.end_row();
                     }
+                });
 
-                    // Remote input server settings
-                    ui.heading("Remote Input Server");
-                    ui.end_row();
+                // Remote input server settings
+                ui.heading("Remote Input Server");
+                egui::Grid::new("remote_settings").show(ui, |ui| {
                     ui.label("Server Address");
-                    ui.text_edit_singleline(&mut self.config.server_address);
+                    ui.add(
+                        TextEdit::singleline(&mut self.config.server_address)
+                            .min_size(Vec2::new(100.0, 10.0)),
+                    );
                     ui.end_row();
                     ui.label("API Key");
-                    ui.add(TextEdit::singleline(&mut self.config.api_key));
+                    ui.add(
+                        TextEdit::singleline(&mut self.config.api_key)
+                            .min_size(Vec2::new(100.0, 10.0)),
+                    );
                     ui.end_row();
+                });
 
-                    // Shortcuts
-                    ui.heading("Shortcuts");
-                    ui.end_row();
-
+                // Shortcuts
+                ui.heading("Shortcuts");
+                egui::Grid::new("shortcut_settings").show(ui, |ui| {
                     ui.label("Pause");
                     self.config.shortcuts.pause.update(ui, last_key_released);
                     ui.end_row();
